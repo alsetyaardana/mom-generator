@@ -1,0 +1,7 @@
+node_modules/
+data/auth_state/*
+!data/auth_state/.gitkeep
+outputs/*
+!outputs/.gitkeep
+npm-debug.log
+*.log

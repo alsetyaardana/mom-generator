@@ -1,0 +1,8 @@
+services:
+  wa-mom-bot:
+    build: .
+    container_name: porta-wa-mom-bot
+    restart: unless-stopped
+    volumes:
+      - ./data/auth_state:/app/data/auth_state
+      - ./outputs:/app/outputs

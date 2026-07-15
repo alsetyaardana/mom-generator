@@ -1,0 +1,15 @@
+{
+  "name": "porta-wa-mom-bot",
+  "version": "0.1.0",
+  "description": "WhatsApp bot (Baileys) that collects MOM meeting details via chat and generates a Porta-branded .docx",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "docx": "^9.0.2",
+    "pino": "^9.4.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
