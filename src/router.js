@@ -23,7 +23,25 @@ function isDone(text) {
 }
 
 const MENU_TEXT =
-  "Mau bikin apa?\n\n1. Buat MOM (Minutes of Meeting)\n\nKetik *1* untuk mulai, atau *reset* kapan saja untuk kembali ke menu.";
+  "Mau bikin apa?\n\n1. Buat MOM (Minutes of Meeting)\n2. Panduan format cerita ideal\n\nKetik *1* atau *2*, atau *reset* kapan saja untuk kembali ke menu.";
+
+const GUIDE_TEXT = `*Panduan cerita ideal buat MOM*
+
+Biar sekali extract langsung lengkap, coba sertakan info berikut waktu cerita (boleh sekaligus atau bertahap):
+
+- *Tanggal* meeting
+- *Project* / nama pekerjaan
+- *Venue* meeting-nya di mana
+- *Notulen* (siapa yang catat)
+- *Attendee*: nama + company masing-masing
+- *Agenda* / tujuan meeting (1 kalimat)
+- *Poin diskusi*: tiap topik + detail pembahasan + siapa yang jadi actionee
+- *Next step* (kalau ada): rencana ke depan + PIC + due date
+
+Contoh pesan:
+"Tanggal 10 September 2025, project RS Mulya Medika Samarinda, venue di Office Porta, notulen Dewi Misnasari. Hadir Alindra dari PT Porta Nusa Indonesia dan Pak Adilfy dari RS Mulya. Agendanya troubleshoot Router Maipu yang down. Ditemukan router mengalami failboot, PIC-nya Alindra dan Pak Adilfy. Next step: monitoring stabilitas router selama 1 minggu, PIC Alindra, due 23 September 2025."
+
+Nggak harus persis kayak gitu — cerita santai juga bisa, nanti kalau ada yang kurang bot bakal tanya balik. Ketik *1* untuk mulai buat MOM.`;
 
 async function reply(sock, jid, text) {
   await sock.sendMessage(jid, { text });
@@ -206,6 +224,9 @@ async function handleMenu(sock, jid, session, trimmed) {
       jid,
       "Oke, cerita aja tentang meeting-nya bebas — bisa langsung lengkap sekaligus, atau bertahap beberapa pesan. Kalau sudah selesai cerita, ketik *selesai*."
     );
+  }
+  if (trimmed === "2") {
+    return reply(sock, jid, GUIDE_TEXT);
   }
   return reply(sock, jid, MENU_TEXT);
 }
