@@ -6,9 +6,11 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
 } = require("@whiskeysockets/baileys");
 
 const { route, MENU_TEXT } = require("./router");
+const { transcribeAudio } = require("./groq");
 
 const AUTH_DIR = path.join(__dirname, "..", "data", "auth_state");
 const logger = pino({ level: process.env.LOG_LEVEL || "warn" });
@@ -57,18 +59,29 @@ async function start() {
       const jid = msg.key.remoteJid;
       if (!jid || jid.endsWith("@g.us") || jid === "status@broadcast") continue;
 
-      const text =
+      let text =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
         "";
-      if (!text) continue;
+
+      const isVoiceNote = !!(msg.message.audioMessage || msg.message.pttMessage);
 
       try {
+        if (isVoiceNote) {
+          await sock.sendMessage(jid, { text: "Mentranskrip voice note..." });
+          const buffer = await downloadMediaMessage(msg, "buffer", {});
+          text = await transcribeAudio(buffer);
+        }
+
+        if (!text) continue;
+
         await route(sock, jid, text);
       } catch (err) {
         console.error("Router error:", err);
         await sock.sendMessage(jid, {
-          text: "Terjadi error. Ketik *reset* untuk mulai ulang.\n\n" + MENU_TEXT,
+          text: isVoiceNote
+            ? "Gagal mentranskrip voice note. Coba lagi atau ketik pesan teks biasa."
+            : "Terjadi error. Ketik *reset* untuk mulai ulang.\n\n" + MENU_TEXT,
         });
       }
     }
