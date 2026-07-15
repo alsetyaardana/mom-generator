@@ -41,4 +41,4 @@ function resetSession(jid) {
   return sessions.get(jid);
 }
 
-module.exports = { getSession, resetSession };
+module.exports = { getSession, resetSession, emptyMomData };

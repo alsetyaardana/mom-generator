@@ -1,22 +1,25 @@
-// Conversation state machine: main menu + structured MOM field collection.
-// No DeepSeek / free-text extraction in this version — every field is
-// asked for explicitly, one at a time, per the approved plan.
+// Conversation state machine:
+//   MENU -> MOM_COLLECT (free-form chat, extracted via DeepSeek per message)
+//        -> MOM_ASK_SIMPLE / attendee loop / list-item loop (only for fields
+//           DeepSeek couldn't find)
+//        -> MOM_TODO_ASK (optional next-step loop)
+//        -> MOM_CONFIRM -> generate + send .docx
+//
+// DeepSeek never invents content — it only extracts what the user actually
+// said. Anything still missing after extraction gets asked explicitly.
 
 const fs = require("fs");
 const path = require("path");
 const { execFile } = require("child_process");
-const { getSession, resetSession } = require("./session-store");
+const { getSession, resetSession, emptyMomData } = require("./session-store");
+const { extractMomData } = require("./deepseek");
 
 const DONE_WORDS = new Set(["selesai", "done", "cukup"]);
+const FINISH_COLLECT_WORDS = new Set(["selesai", "buatkan", "generate", "done"]);
 const SKIP_WORDS = new Set(["skip", "lewati", "-"]);
 
 function isDone(text) {
   return DONE_WORDS.has(text.trim().toLowerCase());
-}
-
-function normalizeBlank(text) {
-  const t = text.trim();
-  return t.length ? t : "";
 }
 
 const MENU_TEXT =
@@ -24,6 +27,38 @@ const MENU_TEXT =
 
 async function reply(sock, jid, text) {
   await sock.sendMessage(jid, { text });
+}
+
+function mergeMomData(oldData, extracted) {
+  const merged = { ...oldData };
+  for (const key of ["date", "project", "attachments", "venue", "minutes_taken_by", "agenda"]) {
+    if (extracted[key]) merged[key] = extracted[key];
+  }
+  for (const key of ["attendees", "distribution_list", "list_items", "todo_items"]) {
+    if (Array.isArray(extracted[key]) && extracted[key].length > 0) {
+      merged[key] = extracted[key];
+    }
+  }
+  return merged;
+}
+
+const FIELD_PROMPTS = {
+  date: "Tanggal meeting-nya kapan?",
+  project: "Ini project / nama pekerjaan apa?",
+  venue: "Venue / lokasi meeting-nya di mana?",
+  minutes_taken_by: "Siapa yang jadi notulen (minutes taken by)?",
+  agenda: "Agenda / tujuan meeting-nya apa? (satu baris)",
+};
+
+function nextMissingField(data) {
+  if (!data.date) return "date";
+  if (!data.project) return "project";
+  if (!data.venue) return "venue";
+  if (!data.minutes_taken_by) return "minutes_taken_by";
+  if (!data.attendees || data.attendees.length === 0) return "attendees";
+  if (!data.agenda) return "agenda";
+  if (!data.list_items || data.list_items.length === 0) return "list_items";
+  return null;
 }
 
 async function route(sock, jid, rawText) {
@@ -42,98 +77,37 @@ async function route(sock, jid, rawText) {
     case "MENU":
       return handleMenu(sock, jid, session, trimmed);
 
-    case "MOM_DATE":
-      session.data.date = trimmed;
-      session.state = "MOM_PROJECT";
-      return reply(sock, jid, "Project / nama pekerjaan?");
+    case "MOM_COLLECT":
+      return handleCollect(sock, jid, session, trimmed);
 
-    case "MOM_PROJECT":
-      session.data.project = trimmed;
-      session.state = "MOM_ATTACHMENTS";
-      return reply(sock, jid, "Attachments? (ketik *-* kalau tidak ada)");
-
-    case "MOM_ATTACHMENTS":
-      session.data.attachments = SKIP_WORDS.has(trimmed.toLowerCase()) ? "" : trimmed;
-      session.state = "MOM_VENUE";
-      return reply(sock, jid, "Venue / lokasi meeting?");
-
-    case "MOM_VENUE":
-      session.data.venue = trimmed;
-      session.state = "MOM_MINUTES_BY";
-      return reply(sock, jid, "Minutes taken by (nama notulen)?");
-
-    case "MOM_MINUTES_BY":
-      session.data.minutes_taken_by = trimmed;
-      session.state = "MOM_ATTENDEE_NAME";
-      return reply(
-        sock,
-        jid,
-        "Sekarang attendee. Nama attendee pertama? (ketik *selesai* kalau sudah semua)"
-      );
+    case "MOM_ASK_SIMPLE":
+      session.data[session.currentField] = trimmed;
+      session.currentField = null;
+      return proceedAfterFieldResolved(sock, jid, session);
 
     case "MOM_ATTENDEE_NAME":
       if (isDone(trimmed)) {
         if (session.data.attendees.length === 0) {
           return reply(sock, jid, "Minimal 1 attendee ya. Nama attendee?");
         }
-        session.state = "MOM_DISTRIBUTION";
-        return reply(
-          sock,
-          jid,
-          "Distribution List? Pisahkan dengan koma kalau lebih dari satu. (Ketik *-* untuk pakai company attendee sebagai default)"
-        );
+        return proceedAfterFieldResolved(sock, jid, session);
       }
       session.tempItem = { name: trimmed };
       session.state = "MOM_ATTENDEE_COMPANY";
       return reply(sock, jid, `Company untuk *${trimmed}*?`);
 
     case "MOM_ATTENDEE_COMPANY":
-      session.data.attendees.push({
-        name: session.tempItem.name,
-        company: trimmed,
-      });
+      session.data.attendees.push({ name: session.tempItem.name, company: trimmed });
       session.tempItem = {};
       session.state = "MOM_ATTENDEE_NAME";
-      return reply(
-        sock,
-        jid,
-        "Attendee berikutnya? (ketik *selesai* kalau sudah semua)"
-      );
-
-    case "MOM_DISTRIBUTION": {
-      if (SKIP_WORDS.has(trimmed.toLowerCase())) {
-        const companies = [...new Set(session.data.attendees.map((a) => a.company).filter(Boolean))];
-        session.data.distribution_list = companies;
-      } else {
-        session.data.distribution_list = trimmed
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-      }
-      session.state = "MOM_AGENDA";
-      return reply(sock, jid, "Agenda / tujuan meeting? (satu baris)");
-    }
-
-    case "MOM_AGENDA":
-      session.data.agenda = trimmed;
-      session.state = "MOM_ITEM_TITLE";
-      return reply(
-        sock,
-        jid,
-        "Sekarang List/Action items. Judul item pertama? (contoh: 'Identifikasi Permasalahan')"
-      );
+      return reply(sock, jid, "Attendee berikutnya? (ketik *selesai* kalau sudah semua)");
 
     case "MOM_ITEM_TITLE":
       if (isDone(trimmed)) {
         if (session.data.list_items.length === 0) {
           return reply(sock, jid, "Minimal 1 item ya. Judul item?");
         }
-        session.state = "MOM_TODO_ASK";
-        return reply(
-          sock,
-          jid,
-          "Ada Next Step / to-do tambahan? (ya/tidak)"
-        );
+        return proceedAfterFieldResolved(sock, jid, session);
       }
       session.tempItem = { title: trimmed, bullets: [] };
       session.state = "MOM_ITEM_BULLETS";
@@ -156,11 +130,7 @@ async function route(sock, jid, rawText) {
 
     case "MOM_ITEM_ACTIONEE":
       session.tempItem.actionee = trimmed;
-      session.state = "MOM_ITEM_DUE";
-      return reply(sock, jid, "Due date? (ketik *-* kalau tidak ada)");
-
-    case "MOM_ITEM_DUE":
-      session.tempItem.due_date = SKIP_WORDS.has(trimmed.toLowerCase()) ? "-" : trimmed;
+      session.tempItem.due_date = "-";
       session.data.list_items.push(session.tempItem);
       session.tempItem = {};
       session.state = "MOM_ITEM_TITLE";
@@ -183,7 +153,7 @@ async function route(sock, jid, rawText) {
         session.state = "MOM_CONFIRM";
         return sendConfirmation(sock, jid, session);
       }
-      session.tempItem = { title: normalizeBlank(trimmed) || "Next Step", bullets: [] };
+      session.tempItem = { title: trimmed || "Next Step", bullets: [] };
       session.state = "MOM_TODO_BULLETS";
       return reply(
         sock,
@@ -229,10 +199,72 @@ async function route(sock, jid, rawText) {
 
 async function handleMenu(sock, jid, session, trimmed) {
   if (trimmed === "1") {
-    session.state = "MOM_DATE";
-    return reply(sock, jid, "Mulai buat MOM. Tanggal meeting? (contoh: 10 September 2025)");
+    session.data = emptyMomData();
+    session.state = "MOM_COLLECT";
+    return reply(
+      sock,
+      jid,
+      "Oke, cerita aja tentang meeting-nya bebas — bisa langsung lengkap sekaligus, atau bertahap beberapa pesan. Kalau sudah selesai cerita, ketik *selesai*."
+    );
   }
   return reply(sock, jid, MENU_TEXT);
+}
+
+async function handleCollect(sock, jid, session, trimmed) {
+  if (FINISH_COLLECT_WORDS.has(trimmed.toLowerCase())) {
+    return proceedAfterFieldResolved(sock, jid, session);
+  }
+
+  try {
+    const extracted = await extractMomData(session.data, trimmed);
+    session.data = mergeMomData(session.data, extracted);
+  } catch (err) {
+    console.error("DeepSeek extraction error:", err);
+    return reply(
+      sock,
+      jid,
+      "Gagal proses lewat AI barusan, coba kirim ulang ceritanya ya. (Kalau terus gagal, cek DEEPSEEK_API_KEY di server.)"
+    );
+  }
+
+  return reply(sock, jid, "Dicatat. Lanjut cerita lagi, atau ketik *selesai* kalau sudah lengkap.");
+}
+
+async function proceedAfterFieldResolved(sock, jid, session) {
+  const missing = nextMissingField(session.data);
+
+  if (missing === "attendees") {
+    session.state = "MOM_ATTENDEE_NAME";
+    return reply(sock, jid, "Siapa aja yang hadir? Nama attendee pertama? (ketik *selesai* kalau sudah semua)");
+  }
+  if (missing === "list_items") {
+    session.state = "MOM_ITEM_TITLE";
+    return reply(
+      sock,
+      jid,
+      "Belum ada List/Action item yang ke-capture. Judul item pertama? (contoh: 'Identifikasi Permasalahan')"
+    );
+  }
+  if (missing) {
+    session.currentField = missing;
+    session.state = "MOM_ASK_SIMPLE";
+    return reply(sock, jid, FIELD_PROMPTS[missing]);
+  }
+
+  // all required fields resolved
+  if (session.data.distribution_list.length === 0) {
+    session.data.distribution_list = [
+      ...new Set(session.data.attendees.map((a) => a.company).filter(Boolean)),
+    ];
+  }
+
+  if (session.data.todo_items.length > 0) {
+    session.state = "MOM_CONFIRM";
+    return sendConfirmation(sock, jid, session);
+  }
+
+  session.state = "MOM_TODO_ASK";
+  return reply(sock, jid, "Ada Next Step / to-do tambahan yang belum ke-capture? (ya/tidak)");
 }
 
 function summarize(data) {
@@ -254,16 +286,16 @@ function summarize(data) {
   lines.push("List/Actions:");
   data.list_items.forEach((item, i) => {
     lines.push(`${i + 1}. ${item.title}`);
-    item.bullets.forEach((b) => lines.push(`   - ${b}`));
-    lines.push(`   Actionee: ${item.actionee} | Due: ${item.due_date}`);
+    (item.bullets || []).forEach((b) => lines.push(`   - ${b}`));
+    lines.push(`   Actionee: ${item.actionee} | Due: ${item.due_date || "-"}`);
   });
   if (data.todo_items.length) {
     lines.push("");
     lines.push("Next Step:");
     data.todo_items.forEach((item, i) => {
       lines.push(`${data.list_items.length + i + 1}. ${item.title}`);
-      item.bullets.forEach((b) => lines.push(`   - ${b}`));
-      lines.push(`   Actionee: ${item.actionee} | Due: ${item.due_date}`);
+      (item.bullets || []).forEach((b) => lines.push(`   - ${b}`));
+      lines.push(`   Actionee: ${item.actionee} | Due: ${item.due_date || "-"}`);
     });
   }
   return lines.join("\n");

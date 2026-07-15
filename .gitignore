@@ -5,3 +5,4 @@ outputs/*
 !outputs/.gitkeep
 npm-debug.log
 *.log
+.env

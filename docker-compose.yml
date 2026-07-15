@@ -3,6 +3,8 @@ services:
     build: .
     container_name: porta-wa-mom-bot
     restart: unless-stopped
+    env_file:
+      - .env
     volumes:
       - ./data/auth_state:/app/data/auth_state
       - ./outputs:/app/outputs
