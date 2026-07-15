@@ -27,6 +27,7 @@ function getSession(jid) {
       state: "MENU",
       data: emptyMomData(),
       tempItem: {},
+      greeted: false,
     });
   }
   return sessions.get(jid);
@@ -37,6 +38,7 @@ function resetSession(jid) {
     state: "MENU",
     data: emptyMomData(),
     tempItem: {},
+    greeted: true,
   });
   return sessions.get(jid);
 }

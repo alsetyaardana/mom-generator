@@ -22,6 +22,9 @@ function isDone(text) {
   return DONE_WORDS.has(text.trim().toLowerCase());
 }
 
+const WELCOME_TEXT =
+  "Halo, selamat datang di *Porta Bot*.\nBot ini bisa bantu bikin dokumen Minutes of Meeting (MOM) langsung dari chat WhatsApp.";
+
 const MENU_TEXT =
   "Mau bikin apa?\n\n1. Buat MOM (Minutes of Meeting)\n2. Panduan format cerita ideal\n\nKetik *1* atau *2*, atau *reset* kapan saja untuk kembali ke menu.";
 
@@ -90,6 +93,11 @@ async function route(sock, jid, rawText) {
   }
 
   const session = getSession(jid);
+
+  if (session.state === "MENU" && !session.greeted) {
+    session.greeted = true;
+    return reply(sock, jid, WELCOME_TEXT + "\n\n" + MENU_TEXT);
+  }
 
   switch (session.state) {
     case "MENU":
