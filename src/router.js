@@ -335,13 +335,24 @@ async function sendConfirmation(sock, jid, session) {
   await reply(
     sock,
     jid,
-    `${summary}\n\n---\nKirim *ya* untuk generate file, *reset* untuk mulai ulang dari awal.`
+    `${summary}\n\n---\nKirim *ya* untuk generate file, tulis koreksinya langsung (contoh: "venue-nya ganti jadi Zoom") untuk edit, atau *reset* untuk mulai ulang dari awal.`
   );
 }
 
 async function handleConfirm(sock, jid, session, trimmed) {
   if (trimmed.toLowerCase() !== "ya") {
-    return reply(sock, jid, "Ketik *ya* untuk generate file, atau *reset* untuk mulai ulang.");
+    try {
+      const extracted = await extractMomData(session.data, trimmed);
+      session.data = mergeMomData(session.data, extracted);
+    } catch (err) {
+      console.error("DeepSeek correction error:", err);
+      return reply(
+        sock,
+        jid,
+        "Gagal proses koreksinya lewat AI, coba kirim ulang ya. Atau ketik *ya* untuk generate langsung, *reset* untuk mulai ulang."
+      );
+    }
+    return sendConfirmation(sock, jid, session);
   }
 
   await reply(sock, jid, "Generating MOM...");
