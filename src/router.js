@@ -82,6 +82,68 @@ function nextMissingField(data) {
   return null;
 }
 
+// Per-item completeness check, run after every top-level required field is
+// present — catches entries DeepSeek extracted but left partially filled
+// (e.g. an attendee with no company, a list item with no actionee).
+function buildFixQueue(data) {
+  const queue = [];
+  data.attendees.forEach((a, index) => {
+    if (!a.name) queue.push({ type: "attendee_name", index });
+    if (!a.company) queue.push({ type: "attendee_company", index });
+  });
+  data.list_items.forEach((item, index) => {
+    if (!item.title) queue.push({ type: "item_title", index });
+    if (!item.bullets || item.bullets.length === 0) queue.push({ type: "item_bullets", index });
+    if (!item.actionee) queue.push({ type: "item_actionee", index });
+  });
+  data.todo_items.forEach((item, index) => {
+    if (!item.due_date) queue.push({ type: "todo_due", index });
+  });
+  return queue;
+}
+
+function fixTaskPrompt(data, task) {
+  switch (task.type) {
+    case "attendee_name":
+      return `Ada attendee yang namanya belum jelas (company: ${data.attendees[task.index].company || "-"}). Namanya siapa?`;
+    case "attendee_company":
+      return `Company untuk attendee *${data.attendees[task.index].name}* apa?`;
+    case "item_title":
+      return "Ada List item yang judulnya belum jelas. Judulnya apa?";
+    case "item_bullets":
+      return `Item *${data.list_items[task.index].title}* belum ada detail pembahasannya. Ceritain detailnya?`;
+    case "item_actionee":
+      return `Item *${data.list_items[task.index].title}* belum ada actionee-nya. Siapa yang bertanggung jawab?`;
+    case "todo_due":
+      return `Next Step *${data.todo_items[task.index].title}* belum ada due date-nya. Due date-nya kapan?`;
+    default:
+      return "Ada info yang belum jelas, tolong lengkapi.";
+  }
+}
+
+function applyFixAnswer(data, task, trimmed) {
+  switch (task.type) {
+    case "attendee_name":
+      data.attendees[task.index].name = trimmed;
+      break;
+    case "attendee_company":
+      data.attendees[task.index].company = trimmed;
+      break;
+    case "item_title":
+      data.list_items[task.index].title = trimmed;
+      break;
+    case "item_bullets":
+      data.list_items[task.index].bullets = trimmed.split("\n").map((s) => s.trim()).filter(Boolean);
+      break;
+    case "item_actionee":
+      data.list_items[task.index].actionee = trimmed;
+      break;
+    case "todo_due":
+      data.todo_items[task.index].due_date = SKIP_WORDS.has(trimmed.toLowerCase()) ? "-" : trimmed;
+      break;
+  }
+}
+
 async function route(sock, jid, rawText) {
   const text = rawText || "";
   const trimmed = text.trim();
@@ -214,6 +276,9 @@ async function route(sock, jid, rawText) {
         "Next Step ditambahkan. Judul berikutnya? (ketik *selesai* kalau sudah semua)"
       );
 
+    case "MOM_FIX":
+      return handleFix(sock, jid, session, trimmed);
+
     case "MOM_CONFIRM":
       return handleConfirm(sock, jid, session, trimmed);
 
@@ -280,18 +345,41 @@ async function proceedAfterFieldResolved(sock, jid, session) {
     return reply(sock, jid, FIELD_PROMPTS[missing]);
   }
 
-  // all required fields resolved
+  const fixQueue = buildFixQueue(session.data);
+  if (fixQueue.length > 0) {
+    session.fixQueue = fixQueue;
+    session.state = "MOM_FIX";
+    return reply(sock, jid, fixTaskPrompt(session.data, fixQueue[0]));
+  }
+
+  return finalizeAndConfirm(sock, jid, session);
+}
+
+async function handleFix(sock, jid, session, trimmed) {
+  const task = session.fixQueue[0];
+  applyFixAnswer(session.data, task, trimmed);
+  session.fixQueue.shift();
+
+  if (session.fixQueue.length > 0) {
+    return reply(sock, jid, fixTaskPrompt(session.data, session.fixQueue[0]));
+  }
+
+  return finalizeAndConfirm(sock, jid, session);
+}
+
+async function finalizeAndConfirm(sock, jid, session) {
   if (session.data.distribution_list.length === 0) {
     session.data.distribution_list = [
       ...new Set(session.data.attendees.map((a) => a.company).filter(Boolean)),
     ];
   }
 
-  if (session.data.todo_items.length > 0) {
+  if (session.data.todo_items.length > 0 || session.todoAsked) {
     session.state = "MOM_CONFIRM";
     return sendConfirmation(sock, jid, session);
   }
 
+  session.todoAsked = true;
   session.state = "MOM_TODO_ASK";
   return reply(sock, jid, "Ada Next Step / to-do tambahan yang belum ke-capture? (ya/tidak)");
 }
@@ -352,7 +440,7 @@ async function handleConfirm(sock, jid, session, trimmed) {
         "Gagal proses koreksinya lewat AI, coba kirim ulang ya. Atau ketik *ya* untuk generate langsung, *reset* untuk mulai ulang."
       );
     }
-    return sendConfirmation(sock, jid, session);
+    return proceedAfterFieldResolved(sock, jid, session);
   }
 
   await reply(sock, jid, "Generating MOM...");
